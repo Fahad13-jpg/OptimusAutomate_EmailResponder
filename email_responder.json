@@ -1,0 +1,400 @@
+{
+  "name": "AI Email Responder (Groq + Gmail)",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "filters": {
+          "labelIds": [
+            "INBOX"
+          ],
+          "readStatus": "unread"
+        }
+      },
+      "id": "f56f4955-26ab-4a60-9e3f-8298ca157d22",
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1856,
+        1872
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "Xhu6D0xNVb7cYGwO",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\n\nconst from = item.From || item.from ||\n  item.payload?.headers?.find(h => h.name === 'From')?.value || 'Unknown Sender';\n\nconst subject = item.Subject || item.subject ||\n  item.payload?.headers?.find(h => h.name === 'Subject')?.value || '(No Subject)';\n\nconst bodyText = (item.snippet || '')\n  .replace(/&amp;/g, '&').replace(/&#39;/g, \"'\")\n  .replace(/&lt;/g, '<').replace(/&gt;/g, '>')\n  .replace(/\\s+/g, ' ').trim().substring(0, 1500);\n\nconst fromLower = from.toLowerCase();\nconst subjectLower = subject.toLowerCase();\nconst bodyLower = bodyText.toLowerCase();\n\nconst automatedSender =\n  /no.?reply|donotreply|noreply/.test(fromLower) ||\n  fromLower.includes('notifications@') ||\n  fromLower.includes('mailer-daemon') ||\n  fromLower.includes('postmaster@') ||\n  fromLower.includes('bounce@') ||\n  fromLower.includes('alerts@') ||\n  fromLower.includes('automated@') ||\n  fromLower.includes('-noreply@') ||\n  fromLower.includes('daemon@');\n\nconst transactionalSubject =\n  /transaction alert|debit alert|credit alert|payment receipt|account statement|otp|one.time.pass|bank alert|invoice #|order confirm|shipment|your receipt|purchase confirm|subscription renew|password reset|verify your|email verification|security alert|login attempt|sign.in alert|2fa|two.factor/.test(subjectLower);\n\nconst transactionalBody =\n  /debit transaction|credit transaction|transaction of (pkr|usd|gbp|eur)|account no:|your account has been|was made in your account|available balance|txn id|transaction id|ref no|reference number/.test(bodyLower);\n\nconst skipEmail = automatedSender || transactionalSubject || transactionalBody;\n\nreturn [{\n  json: {\n    messageId: item.id,\n    threadId: item.threadId,\n    from,\n    subject,\n    bodyText,\n    receivedAt: new Date().toISOString(),\n    skipEmail,\n    skipReason: automatedSender ? 'automated_sender' : transactionalSubject ? 'transactional_subject' : transactionalBody ? 'transactional_body' : null\n  }\n}];"
+      },
+      "id": "edc3186e-6a16-4a0e-80ba-b8bc35d8cf84",
+      "name": "Extract & Pre-filter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1616,
+        1872
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.skipEmail }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              },
+              "id": "cond-skip"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b8637250-da14-4cc8-9257-a09ab9b8e720",
+      "name": "Should Skip?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -1376,
+        1872
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "markAsRead",
+        "messageId": "={{ $json.messageId }}"
+      },
+      "id": "6a6b652e-14f4-4d70-a6cf-74c6931d5e4d",
+      "name": "Mark as Read & Skip",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        -1136,
+        1664
+      ],
+      "webhookId": "c3c865ae-807e-4d1c-a0d9-016e3fa0c331",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "Xhu6D0xNVb7cYGwO",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const email = $input.first().json;\n\nconst systemPrompt = `You are an intelligent email agent for a business. Read the incoming email, decide what to do, and write a short reply if needed.\n\nReturn ONLY valid JSON with exactly these fields:\n- action: 'reply' or 'skip'\n- category: 'inquiry', 'complaint', 'support', 'feedback', 'spam', or 'other'\n- urgency: 'low', 'medium', or 'high'\n- confidence: number between 0.0 and 1.0\n- reply: the reply body text as a string, or empty string if action is skip\n\nACTION RULES:\n- skip: spam, phishing, bulk marketing, newsletters, cold outreach, anything needing no reply\n- reply: real human emails waiting for a response\n\nREPLY RULES:\n- Maximum 3 short sentences only\n- complaint: empathetic, apologetic, solution-focused\n- inquiry: direct and helpful\n- support: patient and clear\n- feedback: warm and grateful\n- other: polite and neutral\n- IMPORTANT: Do NOT invent prices, policies, account info, or any specific details you do not have\n- If you cannot answer specifically, use exactly this text: Thank you for reaching out. Your request has been forwarded to our management team and we will get back to you shortly.\n- Do NOT include a greeting or sign-off in the reply field`;\n\nconst userMessage = `Process this email:\n\nFrom: ${email.from}\nSubject: ${email.subject}\nMessage: ${email.bodyText}`;\n\nconst body = {\n  model: 'llama-3.3-70b-versatile',\n  temperature: 0.3,\n  max_tokens: 400,\n  response_format: { type: 'json_object' },\n  messages: [\n    { role: 'system', content: systemPrompt },\n    { role: 'user', content: userMessage }\n  ]\n};\n\nreturn [{ json: { body: JSON.stringify(body), emailData: email } }];"
+      },
+      "id": "5e15c2dc-f27a-4a88-bcf2-30b937ab4b40",
+      "name": "Build Agent Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1136,
+        2048
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "groqApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"temperature\": 0.3,\n  \"max_tokens\": 400,\n  \"response_format\": { \"type\": \"json_object\" },\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are an intelligent email agent for a business. Read the incoming email, decide what to do, and write a short reply if needed.\\n\\nReturn ONLY valid JSON with exactly these fields:\\n- action: reply or skip\\n- category: inquiry, complaint, support, feedback, spam, or other\\n- urgency: low, medium, or high\\n- confidence: number between 0.0 and 1.0\\n- reply: the reply body text as a string, or empty string if action is skip\\n\\nACTION RULES:\\n- skip: spam, phishing, bulk marketing, newsletters, cold outreach, anything needing no reply\\n- reply: real human emails waiting for a response\\n\\nREPLY RULES:\\n- Maximum 3 short sentences only\\n- complaint: empathetic, apologetic, solution-focused\\n- inquiry: direct and helpful\\n- support: patient and clear\\n- feedback: warm and grateful\\n- other: polite and neutral\\n- Do NOT invent prices, policies, account info, or specific details you do not have\\n- If you cannot answer specifically, use exactly: Thank you for reaching out. Your request has been forwarded to our management team and we will get back to you shortly.\\n- Do NOT include a greeting or sign-off in the reply field\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"=Process this email:\\n\\nFrom: {{ $json.from }}\\nSubject: {{ $json.subject }}\\nMessage: {{ $json.bodyText }}\"\n    }\n  ]\n}",
+        "options": {
+          "timeout": 25000
+        }
+      },
+      "id": "89fd0920-2e6f-4508-b4a3-bc5205259b08",
+      "name": "AI Email Agent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -864,
+        2048
+      ],
+      "credentials": {
+        "groqApi": {
+          "id": "PMk9cRfevLxlDgke",
+          "name": "Groq account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const groqResponse = $input.first().json;\nconst emailData = $('Build Agent Prompt').first().json.emailData;\n\nlet action = 'skip';\nlet category = 'other';\nlet urgency = 'low';\nlet confidence = 0;\nlet replyText = '';\n\ntry {\n  const parsed = JSON.parse(groqResponse.choices[0].message.content);\n  action = (parsed.action || 'skip').toLowerCase().trim();\n  category = (parsed.category || 'other').toLowerCase().trim();\n  urgency = (parsed.urgency || 'low').toLowerCase().trim();\n  confidence = parseFloat(parsed.confidence) || 0;\n  replyText = (parsed.reply || '').trim();\n} catch(e) {\n  action = 'skip';\n}\n\nconst fallback = 'Thank you for reaching out. Your request has been forwarded to our management team and we will get back to you shortly.';\n\nif (action === 'reply' && !replyText) replyText = fallback;\nif (action === 'reply' && confidence < 0.5) replyText = fallback;\n\nconst fromMatch = emailData.from.match(/^([^<@,\"]+)/);\nconst senderName = (fromMatch ? fromMatch[1].trim().split(' ')[0] : 'there') || 'there';\n\nreturn [{\n  json: {\n    action,\n    category,\n    urgency,\n    confidence,\n    replyText,\n    senderName,\n    messageId: emailData.messageId,\n    threadId: emailData.threadId,\n    from: emailData.from,\n    subject: emailData.subject\n  }\n}];"
+      },
+      "id": "f72386fe-876f-4f36-8372-2358e2e81cf4",
+      "name": "Parse Agent Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -608,
+        2048
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "reply",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              },
+              "id": "cond-action"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "37292fee-a87f-4d54-a64b-acdb1237f21c",
+      "name": "Should Reply?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -352,
+        2048
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\n\nconst fullBody = `Hi ${data.senderName},\\n\\n${data.replyText}\\n\\nBest regards,\\nSupport Team`;\n\nreturn [{\n  json: {\n    to: data.from,\n    subject: 'Re: ' + data.subject,\n    body: fullBody,\n    threadId: data.threadId,\n    category: data.category,\n    urgency: data.urgency,\n    originalMessageId: data.messageId\n  }\n}];"
+      },
+      "id": "32990aac-4f1c-43ae-a515-27326b4b1329",
+      "name": "Build Draft",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -96,
+        1872
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "draft",
+        "subject": "={{ $json.subject }}",
+        "message": "={{ $json.body }}",
+        "options": {
+          "threadId": "={{ $json.threadId }}"
+        }
+      },
+      "id": "cbe1c59b-60fe-48b7-8d8d-e3d6b0f3d5e3",
+      "name": "Save as Gmail Draft",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        176,
+        1872
+      ],
+      "webhookId": "43f00900-0ae1-4a03-9b0d-8f261e1b32e0",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "Xhu6D0xNVb7cYGwO",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "markAsRead",
+        "messageId": "={{ $json.messageId }}"
+      },
+      "id": "0e94a931-0362-470e-b01a-77dac2b8322a",
+      "name": "Mark Spam as Read",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        -96,
+        2224
+      ],
+      "webhookId": "04e22224-622f-41e4-8dfb-33c8ce31df5f",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "Xhu6D0xNVb7cYGwO",
+          "name": "Gmail account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "Extract & Pre-filter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract & Pre-filter": {
+      "main": [
+        [
+          {
+            "node": "Should Skip?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Skip?": {
+      "main": [
+        [
+          {
+            "node": "Mark as Read & Skip",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Agent Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Agent Prompt": {
+      "main": [
+        [
+          {
+            "node": "AI Email Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Email Agent": {
+      "main": [
+        [
+          {
+            "node": "Parse Agent Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Agent Response": {
+      "main": [
+        [
+          {
+            "node": "Should Reply?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Reply?": {
+      "main": [
+        [
+          {
+            "node": "Build Draft",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Spam as Read",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Draft": {
+      "main": [
+        [
+          {
+            "node": "Save as Gmail Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "9d2cc871-c94d-4d14-ac27-5b8f3907efd9",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "d2d11452d623d09dc55ea25c1079e151c5a5581a8cf8a5253a795c7dba2e3bfe"
+  },
+  "id": "XxZpAYwtyMSWcPyN",
+  "tags": [
+    {
+      "updatedAt": "2026-06-29T02:39:41.574Z",
+      "createdAt": "2026-06-29T02:39:41.574Z",
+      "id": "MbGPtJemokSAsnXp",
+      "name": "OptimusAutomate"
+    },
+    {
+      "updatedAt": "2026-06-29T02:39:41.621Z",
+      "createdAt": "2026-06-29T02:39:41.621Z",
+      "id": "XYxUgqNhn9jMpJGI",
+      "name": "Gmail"
+    },
+    {
+      "updatedAt": "2026-06-29T02:39:41.559Z",
+      "createdAt": "2026-06-29T02:39:41.559Z",
+      "id": "axKikMp41VvXQV7i",
+      "name": "Groq"
+    },
+    {
+      "updatedAt": "2026-06-29T02:39:41.468Z",
+      "createdAt": "2026-06-29T02:39:41.468Z",
+      "id": "obc8n8AV0lmWZxyU",
+      "name": "AI Automation"
+    }
+  ]
+}
